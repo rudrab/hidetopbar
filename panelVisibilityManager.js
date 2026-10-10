@@ -25,7 +25,7 @@ import Clutter from 'gi://Clutter';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as Layout from 'resource:///org/gnome/shell/ui/layout.js';
 import * as Config from 'resource:///org/gnome/shell/misc/config.js';
-import * as PointerWatcher from 'resource:///org/gnome/shell/ui/pointerWatcher.js';
+import * as PointerWatcher from './pointerWatcher.js';
 const [major] = Config.PACKAGE_VERSION.split('.');
 const shellVersion = Number.parseInt(major);
 
@@ -45,7 +45,7 @@ export class PanelVisibilityManager {
 
     constructor(settings, monitorIndex) {
         this._monitorIndex = monitorIndex;
-        this._base_y = PanelBox.y;
+        this._base_y = Math.max(0, PanelBox.y);
         this._settings = settings;
         this._preventHide = false;
         this._showInOverview = true;
@@ -79,6 +79,7 @@ export class PanelVisibilityManager {
 
         this._pointerWatcher = PointerWatcher.getPointerWatcher();
         this._pointerListener = null;
+        this._edgeListener = null;
 
         // Load settings
         this._bindSettingsChanges();
@@ -127,6 +128,7 @@ export class PanelVisibilityManager {
                 }
                 this._updateHotCorner(true);
                 this._setUnredirectDisabled(false);
+                this._startEdgeWatch();
             }
         });
     }
@@ -155,6 +157,7 @@ export class PanelVisibilityManager {
 
     show(animationTime, trigger) {
         DEBUG("show(" + trigger + ")");
+        this._stopEdgeWatch();
         if(trigger == "mouse-enter"
            && this._settings.get_boolean('mouse-triggers-overview')) {
             Main.overview.show();
@@ -242,6 +245,30 @@ export class PanelVisibilityManager {
                     }
                 );
             }
+        }
+    }
+
+    _startEdgeWatch() {
+        if (!this._edgeListener && this._settings.get_boolean('mouse-sensitive')) {
+            this._edgeListener = this._pointerWatcher.addWatch(20, (x, y) => {
+                if (this._animationActive || this._preventHide)
+                    return;
+                const monitor = Main.layoutManager.monitors[this._monitorIndex] ??
+                                Main.layoutManager.primaryMonitor;
+                if (!monitor) return;
+                if (monitor.inFullscreen && !this._settings.get_boolean('mouse-sensitive-fullscreen-window'))
+                    return;
+                if (y <= monitor.y + 4 && x >= monitor.x && x < monitor.x + monitor.width) {
+                    this.show(this._settings.get_double('animation-time-autohide'), 'mouse-enter');
+                }
+            });
+        }
+    }
+
+    _stopEdgeWatch() {
+        if (this._edgeListener) {
+            this._pointerWatcher._removeWatch(this._edgeListener);
+            this._edgeListener = null;
         }
     }
 
@@ -347,8 +374,8 @@ export class PanelVisibilityManager {
             ...(shellVersion === 45  ? { display: global.display } : { backend: global.backend }),
             x1: PanelBox.x,
             x2: PanelBox.x + PanelBox.width,
-            y1: this._base_y - anchor_y,
-            y2: this._base_y - anchor_y,
+            y1: Math.max(0, this._base_y - anchor_y),
+            y2: Math.max(0, this._base_y - anchor_y),
             directions: direction
         });
         this._panelPressure.addBarrier(this._panelBarrier);
@@ -393,7 +420,13 @@ export class PanelVisibilityManager {
         if(this._settings.get_boolean('mouse-sensitive')) {
             this._disablePressureBarrier();
             this._initPressureBarrier();
-        } else this._disablePressureBarrier();
+            if (PanelBox.y < this._base_y || !PanelBox.visible) {
+                this._startEdgeWatch();
+            }
+        } else {
+            this._disablePressureBarrier();
+            this._stopEdgeWatch();
+        }
     }
 
     _updateSettingsShowInOverview() {
@@ -485,7 +518,7 @@ export class PanelVisibilityManager {
                 Main.layoutManager,
                 'monitors-changed',
                 () => {
-                    this._base_y = PanelBox.y;
+                    this._base_y = Math.max(0, PanelBox.y >= 0 ? PanelBox.y : this._base_y);
                     this._updateStaticBox();
                     this._updateSettingsMouseSensitive();
                 }
@@ -567,13 +600,13 @@ export class PanelVisibilityManager {
         this._signalsHandler.destroy();
         Main.wm.removeKeybinding("shortcut-keybind");
         this._disablePressureBarrier();
+        this._stopEdgeWatch();
         if (_searchEntryBin) {
           _searchEntryBin.style = null;
         }
 
         MessageTray._bannerBin.ease = this._oldEase;
         this.show(0, "destroy");
-        this._setUnredirectDisabled(false);
 
         Main.layoutManager.removeChrome(PanelBox);
         Main.layoutManager.addChrome(PanelBox, {
